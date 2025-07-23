@@ -1,11 +1,12 @@
 import torchvision.transforms.functional as TF
 import numpy as np
 import os
-from scipy.ndimage import median_filter
+from scipy.ndimage import median_filter, binary_dilation
 from skimage.measure import block_reduce
-from qwen_vl_utils import process_vision_info
 from io import BytesIO
 import base64
+import cv2
+import matplotlib.pyplot as plt
 
 def encode_base64(image):
     """
@@ -204,3 +205,108 @@ def high_res(map_func, image, prompt, general_prompt, model, processor):
     block_att = np.block([att_maps[j:j+num_horizontal_split] for j in range(0, num_horizontal_split * num_vertical_split, num_horizontal_split)])
 
     return block_att
+
+def create_att_overlay(image, att_map, output_path = "./overlay.png", alpha_base = 0.5):
+    if hasattr(image, 'convert'):
+        image = np.array(image.convert('RGB'))
+    
+    img_height, img_width = image.shape[:2]
+    patch_height = img_height//att_map.shape[0]
+    patch_width = img_width//att_map.shape[0]
+
+    att_normalized = (att_map - att_map.min()) / (att_map.max() - att_map.min())
+    
+    # Create binary mask for high attention areas (top 30% of attention values)
+    attention_threshold = np.percentile(att_normalized, 70)
+    high_attention_mask = att_normalized > attention_threshold
+    struct_element = np.array([[0, 1, 0],
+                              [1, 1, 1],
+                              [0, 1, 0]], dtype=bool)
+    
+    # Dilate the high attention mask to add buffer
+    buffered_mask = binary_dilation(high_attention_mask, structure=struct_element)
+    # Resize attention map to match image dimensions
+    att_resized = cv2.resize(att_normalized, (img_width, img_height), interpolation=cv2.INTER_LINEAR)
+    buffered_mask_resized = cv2.resize(buffered_mask.astype(np.float32), (img_width, img_height), interpolation=cv2.INTER_NEAREST)
+    # Create alpha map: high attention = low alpha (more visible), low attention = high alpha (more overlay)
+    # For areas with high attention (including buffer): alpha decreases with attention
+    # For areas with low attention: alpha = alpha_base
+    alpha_map = np.ones((img_height, img_width)) * alpha_base
+    # In high attention areas (including buffer), reduce alpha based on attention strength
+    # More attention = less alpha (more visible original image)
+    alpha_map[buffered_mask_resized > 0.5] = alpha_base * (1 - att_resized[buffered_mask_resized > 0.5])
+    # Create overlay color (you can change this to any color you prefer)
+    overlay_color = np.array([255, 0, 0])  # Red overlay
+    
+    # Create the overlay
+    overlay = np.full_like(image, overlay_color, dtype=np.uint8)
+    
+    # Apply alpha blending
+    overlayed_image = image.copy().astype(np.float32)
+    
+    for i in range(3):  # For each color channel
+        overlayed_image[:, :, i] = (1 - alpha_map) * image[:, :, i] + alpha_map * overlay[:, :, i]
+    
+    overlayed_image = overlayed_image.astype(np.uint8)
+    
+    # Save the result
+    cv2.imwrite(output_path, cv2.cvtColor(overlayed_image, cv2.COLOR_RGB2BGR))
+    
+    return overlayed_image
+
+def visualize_attention_process(image, att_map, output_dir="./"):
+    """
+    Creates a comprehensive visualization showing the attention processing steps.
+    
+    Args:
+        image: Input image
+        att_map: 2D attention map from gradient_attention_llava function
+        output_dir: Directory to save output images
+    """
+    
+    # Convert PIL Image to numpy array if needed
+    if hasattr(image, 'convert'):
+        image_np = np.array(image.convert('RGB'))
+    else:
+        image_np = image.copy()
+    
+    # Create the main overlay
+    result = create_att_overlay(image_np, att_map, f"{output_dir}/attention_overlay.png")
+    
+    # Create additional visualizations
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    
+    # Original image
+    axes[0, 0].imshow(image_np)
+    axes[0, 0].set_title("Original Image")
+    axes[0, 0].axis('off')
+    
+    # Attention map
+    im1 = axes[0, 1].imshow(att_map, cmap='hot', interpolation='nearest')
+    axes[0, 1].set_title("Attention Map")
+    axes[0, 1].axis('off')
+    plt.colorbar(im1, ax=axes[0, 1], fraction=0.046, pad=0.04)
+    
+    # High attention mask with buffer
+    att_normalized = (att_map - att_map.min()) / (att_map.max() - att_map.min())
+    attention_threshold = np.percentile(att_normalized, 70)
+    high_attention_mask = att_normalized > attention_threshold
+    struct_element = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+    buffered_mask = binary_dilation(high_attention_mask, structure=struct_element)
+    
+    axes[1, 0].imshow(buffered_mask, cmap='gray')
+    axes[1, 0].set_title("High Attention Areas + Buffer")
+    axes[1, 0].axis('off')
+    
+    # Final result
+    axes[1, 1].imshow(result)
+    axes[1, 1].set_title("Final Overlay Result")
+    axes[1, 1].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/attention_analysis.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved attention overlay to: {output_dir}/attention_overlay.png")
+    print(f"Saved analysis visualization to: {output_dir}/attention_analysis.png")
+ 
