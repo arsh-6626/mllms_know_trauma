@@ -19,7 +19,6 @@ general_question = 'Write a general description of the image.'
 short_prompt = f"<image>\nUSER: {short_question} Answer the question using a single word or phrase.\nASSISTANT:"
 prompt = f"<image>\nUSER: {question} Answer the question using a single word or phrase.\nASSISTANT:"
 general_prompt = f"<image>\nUSER: {general_question} Answer the question using a single word or phrase.\nASSISTANT:"
-image_path = "./casualty"
 image = Image.open(image_path).convert("RGB")
 ori_answer, crop_answer, bbox, att_map = vicrop_qa(model_name, method_name, image_path, question, model, processor, short_question)
 att_map = high_res(rel_attention_llava(image, short_prompt, general_prompt, model, processor))
