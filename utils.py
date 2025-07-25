@@ -205,54 +205,61 @@ def high_res(map_func, image, prompt, general_prompt, model, processor):
     block_att = np.block([att_maps[j:j+num_horizontal_split] for j in range(0, num_horizontal_split * num_vertical_split, num_horizontal_split)])
 
     return block_att
-
-def create_att_overlay(image, att_map, output_path = "./overlay.png", alpha_base = 0.5):
+def create_att_overlay(image, att_map, output_path="./overlay.png", alpha_base=0.4, top_percentile=97):
+    """
+    Creates an attention overlay on the input image, highlighting low-attention regions with
+    a semi-transparent black overlay while leaving high-attention areas unmasked.
+    The overlay is also saved using matplotlib.
+    """
+    # Convert PIL → RGB array if needed
     if hasattr(image, 'convert'):
         image = np.array(image.convert('RGB'))
-    
-    img_height, img_width = image.shape[:2]
-    patch_height = img_height//att_map.shape[0]
-    patch_width = img_width//att_map.shape[0]
 
-    att_normalized = (att_map - att_map.min()) / (att_map.max() - att_map.min())
-    
-    # Create binary mask for high attention areas (top 30% of attention values)
-    attention_threshold = np.percentile(att_normalized, 70)
-    high_attention_mask = att_normalized > attention_threshold
-    struct_element = np.array([[0, 1, 0],
-                              [1, 1, 1],
-                              [0, 1, 0]], dtype=bool)
-    
-    # Dilate the high attention mask to add buffer
-    buffered_mask = binary_dilation(high_attention_mask, structure=struct_element)
-    # Resize attention map to match image dimensions
-    att_resized = cv2.resize(att_normalized, (img_width, img_height), interpolation=cv2.INTER_LINEAR)
-    buffered_mask_resized = cv2.resize(buffered_mask.astype(np.float32), (img_width, img_height), interpolation=cv2.INTER_NEAREST)
-    # Create alpha map: high attention = low alpha (more visible), low attention = high alpha (more overlay)
-    # For areas with high attention (including buffer): alpha decreases with attention
-    # For areas with low attention: alpha = alpha_base
-    alpha_map = np.ones((img_height, img_width)) * alpha_base
-    # In high attention areas (including buffer), reduce alpha based on attention strength
-    # More attention = less alpha (more visible original image)
-    alpha_map[buffered_mask_resized > 0.5] = alpha_base * (1 - att_resized[buffered_mask_resized > 0.5])
-    # Create overlay color (you can change this to any color you prefer)
-    overlay_color = np.array([255, 0, 0])  # Red overlay
-    
-    # Create the overlay
-    overlay = np.full_like(image, overlay_color, dtype=np.uint8)
-    
-    # Apply alpha blending
-    overlayed_image = image.copy().astype(np.float32)
-    
-    for i in range(3):  # For each color channel
-        overlayed_image[:, :, i] = (1 - alpha_map) * image[:, :, i] + alpha_map * overlay[:, :, i]
-    
-    overlayed_image = overlayed_image.astype(np.uint8)
-    
-    # Save the result
-    cv2.imwrite(output_path, cv2.cvtColor(overlayed_image, cv2.COLOR_RGB2BGR))
-    
-    return overlayed_image
+    img_h, img_w = image.shape[:2]
+
+    # Normalize attention to [0,1]
+    att_norm = (att_map - att_map.min()) / (att_map.max() - att_map.min() + 1e-12)
+
+    # Build mask of high-attention patches
+    thresh = np.percentile(att_norm, top_percentile)
+    high_mask = att_norm > thresh
+
+    # Dilate so we buffer around peaks
+    kernel = np.array([[0,1,0],
+                       [1,1,1],
+                       [0,1,0]], dtype=bool)
+    buffered = binary_dilation(high_mask, structure=kernel)
+
+    # Resize masks to full image resolution
+    att_resized_mask = cv2.resize(buffered.astype(np.uint8),
+                                  (img_w, img_h),
+                                  interpolation=cv2.INTER_NEAREST)
+
+    # Initialize alpha map: everywhere = alpha_base
+    alpha_map = np.ones((img_h, img_w), dtype=np.float32) * alpha_base
+
+    # For buffered high-attention regions → no overlay (alpha=0)
+    alpha_map[att_resized_mask > 0] = 0.0
+
+    # Create overlay color (black)
+    overlay_color = np.array([0, 0, 0], dtype=np.uint8)
+    overlay = np.full_like(image, overlay_color)
+
+    # Alpha-blend
+    blended = image.astype(np.float32).copy()
+    for c in range(3):
+        blended[:, :, c] = (1 - alpha_map) * image[:, :, c] + alpha_map * overlay[:, :, c]
+    blended = blended.astype(np.uint8)
+
+    # Save using matplotlib to preserve layout
+    plt.figure(figsize=(img_w/100, img_h/100), dpi=100)
+    plt.imshow(blended)
+    plt.axis('off')
+    plt.tight_layout(pad=0)
+    plt.savefig(output_path, bbox_inches='tight', pad_inches=0)
+    plt.close()
+
+    return blended
 
 def visualize_attention_process(image, att_map, output_dir="./"):
     """
